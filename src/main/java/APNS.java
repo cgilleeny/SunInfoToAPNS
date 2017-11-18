@@ -12,8 +12,8 @@ import java.util.ArrayList;
 import java.util.Date;
 import java.util.TimeZone;
 import java.util.concurrent.ExecutionException;
-import java.util.logging.Logger;
-
+//import java.util.logging.Logger;
+//import java.lang.Math;
 import com.google.gson.JsonSyntaxException;
 import com.relayrides.pushy.apns.ApnsClient;
 import com.relayrides.pushy.apns.ApnsClientBuilder;
@@ -103,44 +103,65 @@ public class APNS {
 			Class.forName("com.mysql.jdbc.Driver");
 	    	
 	    	con = DriverManager.getConnection("jdbc:mysql://10.0.2.195:3306/chickensaver", "tutorial_user", "ABCD3fgh!");
-	    	//stmt = con.createStatement();
+
 	    	SimpleDateFormat dateFormatUTC = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss");
 	    	dateFormatUTC.setTimeZone(TimeZone.getTimeZone("GMT"));
 	    	String UTCDate = dateFormatUTC.format(new Date());	   
-	    	
-	    	cStmt = con.prepareCall("{ CALL getDeviceNeedingPush(?) }");
+	    	System.out.println("UTCDate: " + UTCDate);
+	    	cStmt = con.prepareCall("{ CALL getAlarmToPush(?) }");
 	    	cStmt.setString(1, UTCDate);
 	   	    cStmt.execute();
 	   	    rs = cStmt.getResultSet();
-
-	        ArrayList<Device> devicesList = new ArrayList<Device>();
-	        while (rs.next()) {
-	        	//System.out.println("rs.pid: " + rs.getInt("pid"));
-	        	Device device  = new Device(rs);
-	        	//System.out.println("token: " + device.token + " device.sunset.toString(): " + device.sunset.toString());
-			    devicesList.add(device); 
+	    	
+	   	    ArrayList<Alarm> alarms = new ArrayList<Alarm>();
+	   	    while (rs.next()) {
+	        	Alarm alarm  = new Alarm(rs);
+			    alarms.add(alarm); 
+			    System.out.println("token: " + alarm.token + " alarm.sunset.toString(): " + alarm.sunset.toString());
 	        }
-
-	        //System.out.println("Testing - sendPushNotifications: " + devicesList.size());
-	        
-	        if (devicesList.size() > 0) {
+	   	    
+	        if (alarms.size() > 0) {
+	        	
+		        /*
+		        final ApnsClient apnsClient = new ApnsClientBuilder()
+		        .setClientCredentials(new File("/home/ec2-user/ProductionPushCertificate.p12"), "ABCD3fgh!")
+		        .build();
+		        final Future<Void> connectFuture = apnsClient.connect(ApnsClient.PRODUCTION_APNS_HOST);
+		         */
+	        	
+	        	/*
 		        final ApnsClient apnsClient = new ApnsClientBuilder()
 		        .setClientCredentials(new File("/home/ec2-user/DevelopmentPushCertificate.p12"), "ABCD3fgh!")
 		        .build();
-				
 				final Future<Void> connectFuture = apnsClient.connect(ApnsClient.DEVELOPMENT_APNS_HOST);
 				connectFuture.await();
-		        
-				//Time now = new Time(0);
-				Date now = new Date();
-		        for (Device device : devicesList) {
-		        	System.out.println("timestamp: " + now.getTime() + " pid: " + device.pid);
-					sendPushNotification(device, apnsClient);
-					System.out.println("pid after: " + device.pid);
+		        */
+				//Date now = new Date();
+		        for (Alarm alarm : alarms) {
+		        	System.out.println("timestamp: " + new Date().getTime() + " pid: " + alarm.pid);
+		        	final ApnsClient apnsClient;
+		        	final Future<Void> connectFuture;
+		        	if(alarm.development.equals("sandbox")) {
+		        		apnsClient = new ApnsClientBuilder().setClientCredentials(new File("/home/ec2-user/DevelopmentPushCertificate.p12"), "ABCD3fgh!")
+				        .build();
+						connectFuture = apnsClient.connect(ApnsClient.DEVELOPMENT_APNS_HOST);
+		        	} else {
+				        apnsClient = new ApnsClientBuilder().setClientCredentials(new File("/home/ec2-user/ProductionPushCertificate.p12"), "ABCD3fgh!")
+				        .build();
+				        connectFuture = apnsClient.connect(ApnsClient.PRODUCTION_APNS_HOST);
+		        	}
+		        	connectFuture.await();
+		        	
+					sendAlarmPushNotification(alarm, apnsClient);
+					System.out.println("pid after: " + alarm.pid);
+					cStmt.close();
+					cStmt = con.prepareCall("{ CALL updateAlarmPushCounter(?) }");
+			    	cStmt.setInt(1, alarm.id);
+			   	    cStmt.execute();
+			   	    
+			   	    final Future<Void> disconnectFuture = apnsClient.disconnect();
+			        disconnectFuture.await();
 				}
-		        
-		        final Future<Void> disconnectFuture = apnsClient.disconnect();
-		        disconnectFuture.await();
 	        }
 		} finally {
 			 if (rs != null) {
@@ -155,14 +176,75 @@ public class APNS {
 		}
 	}
 	
+	
+	private void sendAlarmPushNotification(Alarm alarm, ApnsClient apnsClient) throws ClassNotFoundException, SQLException, Exception {
+	    final ApnsPayloadBuilder payloadBuilder = new ApnsPayloadBuilder();
+	    payloadBuilder.setAlertTitle("Sunset Alert");
+	    
+	    if(alarm.offset == 0) {
+	    	payloadBuilder.setAlertSubtitle("The sun is setting.");
+	    } else if(alarm.offset > 0) {
+	    	payloadBuilder.setAlertSubtitle("The sun set " + alarm.offset + " minutes ago.");
+	    } else {
+	    	payloadBuilder.setAlertSubtitle("The sun will set in " + java.lang.Math.abs(alarm.offset) + " minutes.");
+	    }
+	    payloadBuilder.setAlertBody("Do you know where your chickens are?");
+	    payloadBuilder.setSoundFileName(alarm.sound);
+	    payloadBuilder.setCategoryName("snooze.category");
+	    final String payload = payloadBuilder.buildWithDefaultMaximumLength();
+	    System.out.println("payload: " + payload);
+	    
+	    final SimpleApnsPushNotification pushNotification = new SimpleApnsPushNotification(alarm.token, "com.carolinegilleeny.ChickenSaverPlus", payload);
+	    
+	    final Future<PushNotificationResponse<SimpleApnsPushNotification>> sendNotificationFuture =
+	            apnsClient.sendNotification(pushNotification);
+	    
+	    try {
+	        final PushNotificationResponse<SimpleApnsPushNotification> pushNotificationResponse =
+	                sendNotificationFuture.get();
+
+	        if (pushNotificationResponse.isAccepted()) {
+	            System.out.println("Push notification accepted by APNs gateway.");
+	        } else {
+	            System.out.println("Notification rejected by the APNs gateway: " +
+	                    pushNotificationResponse.getRejectionReason());
+
+	            if (pushNotificationResponse.getTokenInvalidationTimestamp() != null) {
+	                System.out.println("\t…and the token is invalid as of " +
+	                    pushNotificationResponse.getTokenInvalidationTimestamp());
+	                setDeviceStatus("invalidated", alarm.pid);
+	            } else if(pushNotificationResponse.getRejectionReason().equalsIgnoreCase("Unregistered")) {
+	            	setDeviceStatus("unregistered", alarm.pid);
+	            } else if(pushNotificationResponse.getRejectionReason().equalsIgnoreCase("BadDeviceToken")) {
+	            	setDeviceStatus("BadDeviceToken", alarm.pid);
+	            } else {
+	            	System.out.println("Unknown pushNotificationResponse rejection reason");
+	            }
+	        }
+
+	    } catch (final ExecutionException e) {
+	        System.err.println("Failed to send push notification.");
+	        e.printStackTrace();
+
+	        if (e.getCause() instanceof ClientNotConnectedException) {
+	            System.out.println("Waiting for client to reconnect…");
+	            apnsClient.getReconnectionFuture().await();
+	            System.out.println("Reconnected.");
+	        }
+	    } 
+	}
+	
+	/*
 	private void sendPushNotification(Device device, ApnsClient apnsClient) throws Exception {
 
 
 	    final ApnsPayloadBuilder payloadBuilder = new ApnsPayloadBuilder();
+	    //payloadBuilder.setMutableContent(true);
+	    payloadBuilder.setContentAvailable(true);
 	    //payloadBuilder.setAlertBody(device.sunset.toString());
 	    payloadBuilder.addCustomProperty("daylength", device.daylength);
 	    payloadBuilder.addCustomProperty("sunset", device.sunset.toString());
-	    payloadBuilder.setContentAvailable(true);
+	    //payloadBuilder.setContentAvailable(true);
 	    
 
 	    final String payload = payloadBuilder.buildWithDefaultMaximumLength();
@@ -206,7 +288,37 @@ public class APNS {
 	    }
 	    
 	}
+	*/
+
+	private void setDeviceStatus(String status, int pid) throws ClassNotFoundException, SQLException, Exception {
+		Statement stmt = null;
+		//ResultSet rs = null;
+		try {
+			Class.forName("com.mysql.jdbc.Driver");
+	    	
+	    	con = DriverManager.getConnection("jdbc:mysql://10.0.2.195:3306/chickensaver", "tutorial_user", "ABCD3fgh!");
+	    	stmt = con.createStatement();
+	    	System.out.println("Setting status for device" + pid);
+	        String sql = "Update chickensaver.apns_devices set status = '" + status + "' where pid = " + pid;
 	
+	        System.out.println(sql);
+	        stmt.executeUpdate(sql);
+	        
+	        //rs = stmt.executeQuery(sql);
+		}finally {
+			 //if (rs != null) {
+			//	 rs.close();
+			 //}
+	   		 if (stmt != null ) {
+				 stmt.close();
+			 }
+	         if (con != null) {
+	        	 con.close();
+	         }
+		} 
+	}
+	
+	/*
 	private void setStatus(String status, Device device) throws ClassNotFoundException, SQLException, Exception {
 		Statement stmt = null;
 		//ResultSet rs = null;
@@ -234,4 +346,5 @@ public class APNS {
 	         }
 		} 
 	}
+	*/
 }
